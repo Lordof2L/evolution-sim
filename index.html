@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Evolution Simulator</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0e14;color:#e0e0e0;font-family:'Inter',sans-serif;overflow:hidden;height:100vh;width:100vw}
+canvas#main{position:absolute;top:0;left:0;width:100%;height:100%;cursor:crosshair}
+.glass{background:rgba(10,14,20,0.82);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(212,168,83,0.2);border-radius:8px;padding:10px 14px;color:#e0e0e0;font-size:12px}
+.top-bar{position:fixed;top:8px;left:8px;right:8px;display:flex;gap:8px;z-index:10;pointer-events:none;align-items:flex-start}
+.top-bar>div{pointer-events:auto;flex-shrink:0}
+.panel-title{color:#d4a853;font-weight:700;font-size:10px;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:6px}
+.stat-row{display:flex;justify-content:space-between;margin:2px 0;gap:12px}
+.stat-val{color:#d4a853;font-weight:600}
+.bl-card{border-left:3px solid;padding:2px 6px;margin:3px 0;font-size:11px;background:rgba(255,255,255,0.03);border-radius:3px}
+button.ctrl{background:rgba(212,168,83,0.15);border:1px solid rgba(212,168,83,0.3);color:#d4a853;padding:4px 10px;border-radius:5px;cursor:pointer;font-size:11px;font-family:'Inter',sans-serif;transition:background .2s}
+button.ctrl:hover{background:rgba(212,168,83,0.3)}
+.controls-panel{margin-left:auto}
+input[type=range]{-webkit-appearance:none;background:rgba(212,168,83,0.15);height:4px;border-radius:2px;outline:none;width:120px}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:#d4a853;cursor:pointer}
+.agent-hud{position:fixed;left:8px;top:50%;transform:translateY(-50%);z-index:10;width:260px;max-height:80vh;overflow-y:auto;scrollbar-width:thin;scrollbar-color:rgba(212,168,83,0.3) transparent}
+.agent-hud::-webkit-scrollbar{width:4px}
+.agent-hud::-webkit-scrollbar-thumb{background:rgba(212,168,83,0.3);border-radius:2px}
+.hud-bar{height:6px;border-radius:3px;background:#111;border:1px solid #222;position:relative;margin:2px 0}
+.hud-bar-fill{height:100%;border-radius:2px;transition:width .15s}
+.overlay{position:fixed;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;z-index:100;background:rgba(10,14,20,0.85);backdrop-filter:blur(6px)}
+.overlay-box{text-align:center;color:#d4a853;font-family:'Press Start 2P',monospace;font-size:12px}
+.speed-badge{position:fixed;top:50%;right:16px;transform:translateY(-50%);z-index:20;font-family:'Press Start 2P',monospace;font-size:14px;color:#d4a853;text-shadow:0 0 12px rgba(212,168,83,0.6);opacity:0;transition:opacity .3s;pointer-events:none}
+.speed-badge.show{opacity:1}
+.nn-legend{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;font-size:9px}
+.nn-legend span{display:flex;align-items:center;gap:3px}
+.nn-dot{display:inline-block;width:8px;height:3px;border-radius:1px}
+</style>
+</head>
+<body>
+<canvas id="main"></canvas>
+
+<div class="top-bar">
+  <div class="glass" id="panelPop">
+    <div class="panel-title">Population</div>
+    <div class="stat-row"><span>Agents</span><span class="stat-val" id="sAgents">0</span></div>
+    <div class="stat-row"><span>Food</span><span class="stat-val" id="sFood">0</span></div>
+    <div class="stat-row"><span>FPS</span><span class="stat-val" id="sFps">0</span></div>
+  </div>
+  <div class="glass" id="panelStats">
+    <div class="panel-title">Stats</div>
+    <div class="stat-row"><span>Max Gen</span><span class="stat-val" id="sMaxGen">0</span></div>
+    <div class="stat-row"><span>Born</span><span class="stat-val" id="sBorn">0</span></div>
+    <div class="stat-row"><span>Deaths</span><span class="stat-val" id="sDeaths">0</span></div>
+    <div class="stat-row"><span>Fitness</span><span class="stat-val" id="sFitness">0</span></div>
+    <div class="stat-row"><span>Avg Conn</span><span class="stat-val" id="sConn">0</span></div>
+    <canvas id="nnChart" width="280" height="100" style="margin-top:6px;border-radius:4px;background:rgba(0,0,0,0.3)"></canvas>
+    <div class="nn-legend">
+      <span><span class="nn-dot" style="background:#4ade80"></span>Lifespan</span>
+      <span><span class="nn-dot" style="background:#d4a853"></span>Gen</span>
+      <span><span class="nn-dot" style="background:#f59e0b"></span>Food/m</span>
+      <span><span class="nn-dot" style="background:#ec4899"></span>Survival</span>
+      <span><span class="nn-dot" style="background:#22d3ee"></span>Conns</span>
+    </div>
+  </div>
+  <div class="glass" id="panelBlood">
+    <div class="panel-title">Bloodlines</div>
+    <div id="bloodList"></div>
+  </div>
+  <div class="glass controls-panel">
+    <div class="panel-title">Controls</div>
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+      <span style="font-size:10px">Speed</span>
+      <input type="range" id="speedSlider" min="1" max="1000" value="1">
+      <span class="stat-val" id="speedVal" style="min-width:32px;text-align:right">1</span>
+    </div>
+    <div style="display:flex;gap:4px;flex-wrap:wrap">
+      <button class="ctrl" id="btnPause">Pause</button>
+      <button class="ctrl" id="btnFit">Fit</button>
+      <button class="ctrl" id="btnCata">Catastrophe</button>
+      <button class="ctrl" id="btnPossess">Possess Best</button>
+    </div>
+    <div style="margin-top:6px;font-size:10px">Zoom: <span class="stat-val" id="zoomVal">1.00</span></div>
+  </div>
+</div>
+
+<div class="agent-hud glass" id="agentHud" style="display:none">
+  <div class="panel-title">Agent <span id="hudId"></span></div>
+  <div class="stat-row"><span>Age</span><span class="stat-val" id="hudAge">0</span></div>
+  <div style="font-size:10px;margin-top:4px">HP</div>
+  <div class="hud-bar"><div class="hud-bar-fill" id="hudHp" style="background:#4ade80"></div></div>
+  <div style="font-size:10px;margin-top:2px">Energy</div>
+  <div class="hud-bar"><div class="hud-bar-fill" id="hudEnergy" style="background:#d4a853"></div></div>
+  <div class="stat-row"><span>Generation</span><span class="stat-val" id="hudGen">0</span></div>
+  <div class="stat-row"><span>Bloodline</span><span class="stat-val" id="hudBlood">0</span></div>
+  <div class="stat-row"><span>Food Eaten</span><span class="stat-val" id="hudFood">0</span></div>
+  <div class="stat-row"><span>Kills</span><span class="stat-val" id="hudKills">0</span></div>
+  <div class="stat-row"><span>Offspring</span><span class="stat-val" id="hudOff">0</span></div>
+  <div class="stat-row"><span>Brain Conns</span><span class="stat-val" id="hudBrain">0</span></div>
+  <canvas id="brainCanvas" width="240" height="180" style="margin-top:6px;border-radius:4px;background:rgba(0,0,0,0.3)"></canvas>
+  <button class="ctrl" id="btnRelease" style="margin-top:8px;width:100%">Release</button>
+</div>
+
+<div class="speed-badge" id="speedBadge">&#9654;&#9654; x<span id="speedBadgeVal">1</span></div>
+
+<div class="overlay" id="reconnectOverlay">
+  <div class="overlay-box">
+    <div style="margin-bottom:12px">&#9889;</div>
+    <div>CONNECTING...</div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const C = $('main'), ctx = C.getContext('2d');
+const nnC = $('nnChart'), nnCtx = nnC.getContext('2d');
+const brC = $('brainCanvas'), brCtx = brC.getContext('2d');
+
+let terrain = [], mapSize = 800, agents = [], food = [], stats = {}, tick = 0;
+let possessedId = null, possessedAgent = null;
+let cam = { x: 400, y: 400, zoom: 1 };
+let keys = {}, mouseX = 0, mouseY = 0;
+let ws = null, connected = false, paused = false;
+let lastFrameTime = performance.now(), fps = 0, frameCount = 0, fpsTimer = 0;
+let dragging = false, dragStart = { x: 0, y: 0 }, camStart = { x: 0, y: 0 };
+
+function resize() { C.width = window.innerWidth; C.height = window.innerHeight; }
+window.addEventListener('resize', resize); resize();
+
+function w2s(wx, wy) {
+  return { x: (wx - cam.x) * cam.zoom + C.width / 2, y: (wy - cam.y) * cam.zoom + C.height / 2 };
+}
+function onScreen(sx, sy, margin) {
+  return sx > -margin && sx < C.width + margin && sy > -margin && sy < C.height + margin;
+}
+// Terrain cache — render once to offscreen canvas, redraw only on zoom/pan change
+var terrainCache = null, terrainCacheKey = '';
+function getTerrainCache() {
+  var key = cam.x.toFixed(0) + ',' + cam.y.toFixed(0) + ',' + cam.zoom.toFixed(3);
+  if (terrainCacheKey === key && terrainCache) return terrainCache;
+  if (!terrain.length) return null;
+  if (!terrainCache) { terrainCache = document.createElement('canvas'); }
+  terrainCache.width = C.width; terrainCache.height = C.height;
+  var tc = terrainCache.getContext('2d');
+  var cellSize = mapSize / (terrain.length || 40);
+  for (var y = 0; y < terrain.length; y++) {
+    var row = terrain[y]; if (!row) continue;
+    for (var x = 0; x < row.length; x++) {
+      var t = row[x]; if (t === 2) continue;
+      var s = w2s(x * cellSize, y * cellSize);
+      var sz = cellSize * cam.zoom;
+      if (!onScreen(s.x, s.y, sz)) continue;
+      tc.fillStyle = t === 0 ? 'rgba(0,60,160,0.35)' : 'rgba(60,150,40,0.4)';
+      tc.fillRect(s.x, s.y, sz + 1, sz + 1);
+    }
+  }
+  terrainCacheKey = key;
+  return terrainCache;
+}
+function s2w(sx, sy) {
+  return { x: (sx - C.width / 2) / cam.zoom + cam.x, y: (sy - C.height / 2) / cam.zoom + cam.y };
+}
+function fitView() {
+  cam.x = mapSize / 2; cam.y = mapSize / 2;
+  cam.zoom = Math.min(C.width, C.height) / (mapSize + 40);
+  $('zoomVal').textContent = cam.zoom.toFixed(2);
+}
+
+function connect() {
+  ws = new WebSocket('ws://localhost:3333');
+  ws.onopen = function() { connected = true; $('reconnectOverlay').style.display = 'none'; };
+  ws.onclose = function() { connected = false; $('reconnectOverlay').style.display = 'flex'; setTimeout(connect, 2000); };
+  ws.onerror = function() { ws.close(); };
+  ws.onmessage = function(e) {
+    var m = JSON.parse(e.data);
+    if (m.type === 'terrain') { terrain = m.terrain; mapSize = m.mapSize; fitView(); }
+    else if (m.type === 'state') {
+      tick = m.tick; agents = m.agents || []; food = m.food || []; stats = m.stats || {};
+      if (possessedId != null) possessedAgent = agents.find(function(a) { return a.id === possessedId; }) || null;
+    }
+    else if (m.type === 'possessed') { possessedId = m.agentId; $('agentHud').style.display = 'block'; }
+    else if (m.type === 'released') { possessedId = null; possessedAgent = null; $('agentHud').style.display = 'none'; }
+  };
+}
+function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+connect();
+
+document.addEventListener('keydown', function(e) {
+  keys[e.key.toLowerCase()] = true;
+  if (e.key === 'Escape') send({ type: 'release' });
+  if (e.key.toLowerCase() === 'f') fitView();
+  sendInput();
+});
+document.addEventListener('keyup', function(e) { delete keys[e.key.toLowerCase()]; sendInput(); });
+
+function sendInput() {
+  if (possessedId == null) return;
+  var k = {};
+  if (keys['w'] || keys['arrowup']) k.w = true;
+  if (keys['s'] || keys['arrowdown']) k.s = true;
+  if (keys['a'] || keys['arrowleft']) k.a = true;
+  if (keys['d'] || keys['arrowright']) k.d = true;
+  send({ type: 'input', keys: k, mouseX: mouseX, mouseY: mouseY });
+}
+
+C.addEventListener('wheel', function(e) {
+  e.preventDefault();
+  var f = e.deltaY > 0 ? 0.9 : 1.1;
+  cam.zoom = Math.max(0.1, Math.min(10, cam.zoom * f));
+  $('zoomVal').textContent = cam.zoom.toFixed(2);
+}, { passive: false });
+
+C.addEventListener('mousedown', function(e) {
+  if (e.shiftKey || e.button === 2) {
+    dragging = true; dragStart = { x: e.clientX, y: e.clientY }; camStart = { x: cam.x, y: cam.y }; return;
+  }
+  if (e.button === 0) {
+    var w = s2w(e.clientX, e.clientY);
+    var best = null, bestD = 20 / cam.zoom;
+    for (var i = 0; i < agents.length; i++) {
+      var d = Math.hypot(agents[i].x - w.x, agents[i].y - w.y);
+      if (d < bestD) { bestD = d; best = agents[i]; }
+    }
+    if (best) send({ type: 'possessId', agentId: best.id });
+  }
+});
+C.addEventListener('mousemove', function(e) {
+  var w = s2w(e.clientX, e.clientY); mouseX = w.x; mouseY = w.y;
+  if (dragging) { cam.x = camStart.x - (e.clientX - dragStart.x) / cam.zoom; cam.y = camStart.y - (e.clientY - dragStart.y) / cam.zoom; }
+  if (possessedId != null) sendInput();
+});
+C.addEventListener('mouseup', function() { dragging = false; });
+C.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+
+$('speedSlider').addEventListener('input', function(e) {
+  var v = +e.target.value; $('speedVal').textContent = v; send({ type: 'speed', value: v });
+  $('speedBadgeVal').textContent = v;
+  $('speedBadge').classList.toggle('show', v > 2);
+});
+$('btnPause').addEventListener('click', function() { paused = !paused; send({ type: 'pause' }); $('btnPause').textContent = paused ? 'Resume' : 'Pause'; });
+$('btnFit').addEventListener('click', fitView);
+$('btnCata').addEventListener('click', function() { send({ type: 'catastrophe' }); });
+$('btnPossess').addEventListener('click', function() { send({ type: 'possess' }); });
+$('btnRelease').addEventListener('click', function() { send({ type: 'release' }); });
+
+function blColor(bl) { return 'hsl(' + ((bl * 137) % 360) + ',70%,55%)'; }
+
+function drawTerrain() {
+  var cached = getTerrainCache();
+  if (cached) ctx.drawImage(cached, 0, 0);
+}
+
+function drawBoundary() {
+  var center = w2s(mapSize / 2, mapSize / 2);
+  var r = (mapSize / 2) * cam.zoom;
+  ctx.beginPath(); ctx.arc(center.x, center.y, r, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(212,168,83,0.25)'; ctx.lineWidth = 2; ctx.stroke();
+}
+
+function drawFood() {
+  for (var i = 0; i < food.length; i++) {
+    var f = food[i];
+    var s = w2s(f.x, f.y);
+    if (!onScreen(s.x, s.y, 20)) continue; // skip offscreen
+    var r = Math.max(f.r || 2, 1.5) * cam.zoom;
+    ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = f.c || f.color || '#88ff88'; ctx.fill();
+    if (f.hp != null && f.maxHp != null && f.hp < f.maxHp) {
+      var bw = r * 2.5, bx = s.x - bw / 2, by = s.y - r - 4 * cam.zoom;
+      ctx.fillStyle = '#111'; ctx.fillRect(bx, by, bw, 2 * cam.zoom);
+      ctx.fillStyle = '#4ade80'; ctx.fillRect(bx, by, bw * (f.hp / f.maxHp), 2 * cam.zoom);
+    }
+  }
+}
+
+var CCOL = { core: '#888', mouth: '#ff6666', muscle: '#6688ff', sensor: '#ffffff', armor: '#666666' };
+function drawAgents() {
+  for (var i = 0; i < agents.length; i++) {
+    var a = agents[i];
+    var s = w2s(a.x, a.y);
+    if (!onScreen(s.x, s.y, 60)) continue; // skip offscreen
+    var col = blColor(a.bloodline);
+    var cellCount = a.cells ? a.cells.length : 1;
+    var r = (3 + Math.sqrt(cellCount) * 2.5 + (a.energy / a.maxEnergy) * 2) * cam.zoom;
+
+    // Possessed glow
+    if (a.id === possessedId) {
+      ctx.beginPath(); ctx.arc(s.x, s.y, r + 6 * cam.zoom, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(212,168,83,0.15)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(212,168,83,0.6)'; ctx.lineWidth = 2; ctx.stroke();
+    }
+
+    // Draw cells or simple dot
+    if (a.cells && a.cells.length > 1 && r > 6) {
+      ctx.save();
+      ctx.translate(s.x, s.y);
+      ctx.rotate(a.angle);
+      var cs = 3.5 * cam.zoom;
+      var maxDraw = Math.min(a.cells.length, 15);
+      // Connections only if zoomed in enough
+      if (cam.zoom > 0.3) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.lineWidth = cam.zoom;
+        for (var ci = 1; ci < maxDraw; ci++) {
+          var p = a.cells[ci-1], c = a.cells[ci];
+          ctx.beginPath(); ctx.moveTo(p.lx*cam.zoom, p.ly*cam.zoom);
+          ctx.lineTo(c.lx*cam.zoom, c.ly*cam.zoom); ctx.stroke();
+        }
+      }
+      var alpha = 0.5 + (a.energy / a.maxEnergy) * 0.5;
+      for (var ci = 0; ci < maxDraw; ci++) {
+        var c = a.cells[ci];
+        var cx = c.lx * cam.zoom, cy = c.ly * cam.zoom;
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = CCOL[c.type] || col;
+        ctx.beginPath(); ctx.arc(cx, cy, cs, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      ctx.restore();
+    } else if (a.cells && a.cells.length > 1) {
+      // Zoomed out — simple circle
+      ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = col; ctx.fill();
+    } else {
+      // Single cell dot
+      ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = col; ctx.fill();
+    }
+
+    // Direction line
+    ctx.beginPath(); ctx.moveTo(s.x, s.y);
+    ctx.lineTo(s.x + Math.cos(a.angle) * r * 1.5, s.y + Math.sin(a.angle) * r * 1.5);
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 1.5 * cam.zoom; ctx.stroke();
+
+    // HP + Energy bars — fixed pixel size, not scaled with zoom
+    var bw = 15, bx = s.x - bw / 2;
+    var bh = 2, gap = 1;
+    var ey = s.y - r - 4 - bh * 2 - gap;
+    var eRatio = Math.max(0, a.energy / a.maxEnergy);
+    ctx.fillStyle = '#111'; ctx.fillRect(bx - 0.5, ey - 0.5, bw + 1, bh + 1);
+    ctx.fillStyle = eRatio > 0.3 ? '#d4a853' : eRatio > 0.1 ? '#c2710c' : '#7f1d1d';
+    ctx.fillRect(bx, ey, bw * eRatio, bh);
+    var hy = ey + bh + gap;
+    var hRatio = Math.max(0, a.hp / a.maxHp);
+    ctx.fillStyle = '#111'; ctx.fillRect(bx - 0.5, hy - 0.5, bw + 1, bh + 1);
+    ctx.fillStyle = hRatio > 0.5 ? '#4ade80' : hRatio > 0.2 ? '#f59e0b' : '#ef4444';
+    ctx.fillRect(bx, hy, bw * hRatio, bh);
+  }
+}
+
+function drawNNChart() {
+  var h = stats.nnHistory; if (!h) return;
+  var w = 280, ht = 100;
+  nnCtx.clearRect(0, 0, w, ht);
+  var series = [
+    { data: h.lifespan, color: '#4ade80' },
+    { data: h.gen, color: '#d4a853' },
+    { data: h.foodPerMin, color: '#f59e0b' },
+    { data: h.survivalRate, color: '#ec4899' },
+    { data: h.avgConnections, color: '#22d3ee' }
+  ];
+  for (var si = 0; si < series.length; si++) {
+    var s = series[si];
+    if (!s.data || s.data.length < 2) continue;
+    var max = Math.max.apply(null, s.data);
+    if (max === 0) max = 1;
+    nnCtx.beginPath();
+    for (var j = 0; j < s.data.length; j++) {
+      var x = (j / (s.data.length - 1)) * w;
+      var y = ht - (s.data[j] / max) * (ht - 4) - 2;
+      j === 0 ? nnCtx.moveTo(x, y) : nnCtx.lineTo(x, y);
+    }
+    nnCtx.strokeStyle = s.color; nnCtx.lineWidth = 1.5; nnCtx.stroke();
+  }
+}
+
+function drawBrain(agent) {
+  if (!agent) return;
+  var w = 240, h = 180;
+  brCtx.clearRect(0, 0, w, h);
+  var inLabels = ['const','energy','fAngle','fDist','aAngle','aDist','onFd','mem'];
+  var outLabels = ['accel','rotate','eat','repro'];
+  var inCount = inLabels.length, outCount = outLabels.length;
+  var conns = agent.brainConnections || [];
+  var nodes = {};
+  var inX = 30, outX = w - 30;
+  var i, n, id;
+  for (i = 0; i < inCount; i++) nodes[i] = { x: inX, y: 16 + i * ((h - 32) / (inCount - 1)), label: inLabels[i], type: 'in' };
+  for (i = 0; i < outCount; i++) nodes[inCount + i] = { x: outX, y: 30 + i * ((h - 60) / (outCount - 1)), label: outLabels[i], type: 'out' };
+  var hiddenIds = {};
+  for (i = 0; i < conns.length; i++) {
+    if (!(conns[i].from in nodes)) hiddenIds[conns[i].from] = true;
+    if (!(conns[i].to in nodes)) hiddenIds[conns[i].to] = true;
+  }
+  var hiddenArr = Object.keys(hiddenIds).map(Number).sort(function(a, b) { return a - b; });
+  for (i = 0; i < hiddenArr.length; i++) {
+    var col = (i % 3);
+    nodes[hiddenArr[i]] = { x: inX + (outX - inX) * (0.3 + 0.15 * col), y: 20 + (i / Math.max(hiddenArr.length - 1, 1)) * (h - 40), label: '', type: 'hidden' };
+  }
+  for (i = 0; i < conns.length; i++) {
+    var c = conns[i];
+    var from = nodes[c.from], to = nodes[c.to]; if (!from || !to) continue;
+    var aw = Math.abs(c.weight);
+    brCtx.beginPath(); brCtx.moveTo(from.x, from.y); brCtx.lineTo(to.x, to.y);
+    var alpha = c.enabled ? 0.3 + Math.min(aw * 0.3, 0.7) : 0.08;
+    brCtx.strokeStyle = c.weight >= 0 ? 'rgba(74,222,128,' + alpha + ')' : 'rgba(239,68,68,' + alpha + ')';
+    brCtx.lineWidth = Math.min(1 + aw * 1.5, 4);
+    if (!c.enabled) brCtx.setLineDash([3, 3]); else brCtx.setLineDash([]);
+    brCtx.stroke();
+  }
+  brCtx.setLineDash([]);
+  var outs = agent.outputs || {};
+  var outVals = {};
+  outVals[inCount] = outs.accelerate || 0;
+  outVals[inCount + 1] = outs.rotate || 0;
+  outVals[inCount + 2] = outs.eat || 0;
+  outVals[inCount + 3] = outs.reproduce || 0;
+  var nodeIds = Object.keys(nodes);
+  for (i = 0; i < nodeIds.length; i++) {
+    id = nodeIds[i]; n = nodes[id];
+    var act = outVals[id] !== undefined ? Math.abs(outVals[id]) : 0.3;
+    var r = 4 + act * 4;
+    brCtx.beginPath(); brCtx.arc(n.x, n.y, r, 0, Math.PI * 2);
+    brCtx.fillStyle = n.type === 'in' ? '#22d3ee' : n.type === 'out' ? '#d4a853' : '#888';
+    brCtx.fill();
+    brCtx.strokeStyle = '#333'; brCtx.lineWidth = 1; brCtx.stroke();
+    if (n.label) {
+      brCtx.fillStyle = '#aaa'; brCtx.font = '8px Inter';
+      brCtx.textAlign = n.type === 'in' ? 'right' : 'left';
+      brCtx.fillText(n.label, n.type === 'in' ? n.x - r - 3 : n.x + r + 3, n.y + 3);
+    }
+  }
+}
+
+function updateHud() {
+  var a = possessedAgent; if (!a) return;
+  $('hudId').textContent = '#' + a.id;
+  $('hudAge').textContent = a.age;
+  $('hudGen').textContent = a.generation;
+  $('hudBlood').textContent = a.bloodline;
+  $('hudFood').textContent = a.foodEaten;
+  $('hudKills').textContent = a.kills;
+  $('hudOff').textContent = a.offspringCount;
+  var enabledConns = 0;
+  var bc = a.brainConnections || [];
+  for (var i = 0; i < bc.length; i++) if (bc[i].enabled) enabledConns++;
+  $('hudBrain').textContent = enabledConns;
+  var hpR = a.hp / a.maxHp, eR = a.energy / a.maxEnergy;
+  $('hudHp').style.width = (hpR * 100) + '%';
+  $('hudHp').style.background = hpR > 0.5 ? '#4ade80' : hpR > 0.2 ? '#f59e0b' : '#ef4444';
+  $('hudEnergy').style.width = (eR * 100) + '%';
+  $('hudEnergy').style.background = eR > 0.3 ? '#d4a853' : eR > 0.1 ? '#c2710c' : '#7f1d1d';
+  drawBrain(a);
+}
+
+function updateBloodlines() {
+  var bl = (stats.topBloodlines || []).slice(0, 6);
+  var container = $('bloodList');
+  while (container.firstChild) container.removeChild(container.firstChild);
+  for (var i = 0; i < bl.length; i++) {
+    var b = bl[i];
+    var card = document.createElement('div');
+    card.className = 'bl-card';
+    card.style.borderColor = blColor(b.id);
+    var label = document.createElement('span');
+    label.style.color = blColor(b.id);
+    label.textContent = '#' + b.id;
+    card.appendChild(label);
+    card.appendChild(document.createTextNode(' \u2014 ' + b.members + ' members, gen ' + b.maxGen));
+    container.appendChild(card);
+  }
+}
+
+function updatePanels() {
+  $('sAgents').textContent = agents.length;
+  $('sFood').textContent = food.length;
+  $('sFps').textContent = fps;
+  $('sMaxGen').textContent = stats.maxGen || 0;
+  $('sBorn').textContent = stats.totalBorn || 0;
+  $('sDeaths').textContent = stats.totalDeaths || 0;
+  $('sFitness').textContent = Math.round(stats.avgFitness || 0);
+  $('sConn').textContent = (stats.avgConnections || 0).toFixed(1);
+  updateBloodlines();
+  drawNNChart();
+}
+
+function render() {
+  requestAnimationFrame(render);
+  var now = performance.now();
+  frameCount++;
+  fpsTimer += now - lastFrameTime;
+  lastFrameTime = now;
+  if (fpsTimer >= 1000) { fps = frameCount; frameCount = 0; fpsTimer = 0; }
+  ctx.clearRect(0, 0, C.width, C.height);
+  drawTerrain();
+  drawBoundary();
+  drawFood();
+  drawAgents();
+  if (possessedAgent) {
+    cam.x += (possessedAgent.x - cam.x) * 0.1;
+    cam.y += (possessedAgent.y - cam.y) * 0.1;
+  }
+  updatePanels();
+  if (possessedId != null) updateHud();
+}
+render();
+</script>
+</body>
+</html>

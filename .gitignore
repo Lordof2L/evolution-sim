@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Environment
+.env
+.env.*
+
+# Backups (internal iterations)
+server_old_backup.js
+server_v1_backup2.js
+server_v2.js
+index_old_backup.html
+index_v1_backup2.html
+index_v2.html
+
+# Internal planning docs
+docs/superpowers/
+
+# Save files
+save.json
+
+# Logs
+*.log
+monitor_log.jsonl
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
