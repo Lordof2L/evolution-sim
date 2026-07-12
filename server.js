@@ -5,7 +5,9 @@ const path = require('path');
 const WebSocket = require('ws');
 
 // ─── CONSTANTS ───────────────────────────────────────────────
-const PORT = 3333;
+const PORT = Number(process.env.PORT) || 3333;
+// Secure default: listen on loopback only. Set HOST=0.0.0.0 to expose on LAN.
+const HOST = process.env.HOST || '127.0.0.1';
 const TICK_RATE = 30;
 const MAP_SIZE = 800;
 const MAP_CENTER = 400;
@@ -18,7 +20,8 @@ const INITIAL_AGENTS = 80;
 const SENSING_RANGE = 100;
 const SPATIAL_CELL = 50;
 const SAVE_FILE = path.join(__dirname, 'save.json');
-const SAVE_VERSION = 8;
+const SAVE_VERSION = 9;       // v9 adds cells + memoryCell persistence
+const MIN_LOAD_VERSION = 8;   // v8 saves still load (cells default to core)
 
 // ─── GLOBAL STATE ────────────────────────────────────────────
 let agents = [];
@@ -621,6 +624,11 @@ function tick() {
     }
   }
 
+  // If the possessed organism died this tick, tell the client so the HUD closes
+  if (possessedId != null && !agents.some(a => a.alive && a.id === possessedId)) {
+    releasePossession();
+  }
+
   agents = agents.filter(a => a.alive);
   food = food.filter(f => !f.eaten); // remove eaten food
 
@@ -654,9 +662,16 @@ function tick() {
 
 // ─── BLOODLINES ──────────────────────────────────────────────
 function getTopBloodlines() {
-  const counts = {};
-  for (const a of agents) counts[a.bloodline] = (counts[a.bloodline] || 0) + 1;
-  return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([bl, count]) => ({ bloodline: Number(bl), count }));
+  const byLine = {};
+  for (const a of agents) {
+    const entry = byLine[a.bloodline] || (byLine[a.bloodline] = { members: 0, maxGen: 0 });
+    entry.members++;
+    if (a.generation > entry.maxGen) entry.maxGen = a.generation;
+  }
+  return Object.entries(byLine)
+    .sort((a, b) => b[1].members - a[1].members)
+    .slice(0, 6)
+    .map(([bl, e]) => ({ id: Number(bl), members: e.members, maxGen: e.maxGen }));
 }
 
 // ─── SAVE / LOAD ─────────────────────────────────────────────
@@ -670,6 +685,7 @@ function saveState() {
       foodEaten: a.foodEaten, kills: a.kills, offspringCount: a.offspringCount,
       generation: a.generation, bloodline: a.bloodline,
       reproTimer: a.reproTimer, eatCooldown: a.eatCooldown,
+      cells: a.cells, memoryCell: a.memoryCell || 0,
       brain: {
         connections: a.brain.connections,
         nextNode: a.brain.nextNode,
@@ -679,14 +695,19 @@ function saveState() {
     food: food.map(f => ({ id: f.id, x: f.x, y: f.y, r: f.r, energy: f.energy, hp: f.hp, maxHp: f.maxHp, color: f.color, type: f.type })),
     terrain, stats, nnHistory,
   };
-  try { fs.writeFileSync(SAVE_FILE, JSON.stringify(data)); } catch (e) { console.error('Save error:', e.message); }
+  // Atomic write: tmp + rename, so a kill mid-write can't corrupt the save
+  try {
+    const tmp = SAVE_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(data));
+    fs.renameSync(tmp, SAVE_FILE);
+  } catch (e) { console.error('Save error:', e.message); }
 }
 
 function loadState() {
   try {
     if (!fs.existsSync(SAVE_FILE)) return false;
     const data = JSON.parse(fs.readFileSync(SAVE_FILE, 'utf8'));
-    if (data.version < SAVE_VERSION) { console.log('Old save version, ignoring.'); return false; }
+    if (data.version < MIN_LOAD_VERSION) { console.log('Old save version, ignoring.'); return false; }
     tickCount = data.tickCount || 0;
     nextId = data.nextId || 1;
     nextInnovation = data.nextInnovation || 0;
@@ -704,15 +725,19 @@ function loadState() {
         brain.nodes.clear();
         for (const [id, type] of a.brain.nodeTypes) brain.nodes.set(id, { value: 0, type });
       }
-      return {
+      const restored = {
         id: a.id, x: a.x, y: a.y, angle: a.angle, speed: a.speed || 0,
         energy: a.energy, hp: a.hp, age: a.age,
         brain, foodEaten: a.foodEaten, kills: a.kills, offspringCount: a.offspringCount,
         generation: a.generation, bloodline: a.bloodline,
+        cells: Array.isArray(a.cells) && a.cells.length ? a.cells : [{ type: 'core', lx: 0, ly: 0 }],
+        memoryCell: a.memoryCell || 0,
         alive: true, reproTimer: a.reproTimer || 0, eatCooldown: a.eatCooldown || 0,
         touchingFood: null, touchingAgent: null,
         outputs: { accelerate: 0, rotate: 0, eat: 0, reproduce: 0 },
       };
+      restored.hp = Math.min(restored.hp, agentMaxHp(restored));
+      return restored;
     });
     console.log(`Loaded save: ${agents.length} agents, tick ${tickCount}`);
     return true;
@@ -720,28 +745,65 @@ function loadState() {
 }
 
 // ─── HTTP SERVER ─────────────────────────────────────────────
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
+
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer',
+  // Inline script/style are part of the single-file client; everything else is blocked.
+  'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+};
+
+function clampSpeed(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return simSpeed; // ignore garbage — a NaN here used to freeze the whole loop
+  return Math.max(1, Math.min(1000, Math.trunc(n)));
+}
 
 const server = http.createServer((req, res) => {
-  if (req.method === 'GET' && req.url === '/stats') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+  if (req.method === 'GET' && req.url.split('?')[0] === '/stats') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...SECURITY_HEADERS });
     return res.end(JSON.stringify({ ...stats, tickCount, foodCount: food.length, bloodlines: getTopBloodlines(), nnHistory }));
   }
-  if (req.method === 'POST' && req.url === '/speed') {
+  if (req.method === 'POST' && req.url.split('?')[0] === '/speed') {
     let body = '';
-    req.on('data', c => body += c);
+    let aborted = false;
+    req.on('data', c => {
+      body += c;
+      if (body.length > 1024) { // tiny endpoint — anything bigger is abuse
+        aborted = true;
+        res.writeHead(413, { 'Content-Type': 'application/json', ...SECURITY_HEADERS });
+        res.end(JSON.stringify({ error: 'payload too large' }));
+        req.destroy();
+      }
+    });
     req.on('end', () => {
-      try { simSpeed = JSON.parse(body).speed || 1; } catch (e) {}
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      if (aborted) return;
+      try { simSpeed = clampSpeed(JSON.parse(body).speed); } catch (e) {}
+      res.writeHead(200, { 'Content-Type': 'application/json', ...SECURITY_HEADERS });
       res.end(JSON.stringify({ speed: simSpeed }));
     });
     return;
   }
-  let filePath = path.join(__dirname, req.url === '/' ? 'index.html' : req.url);
+
+  // Static files — resolve strictly inside the project dir (no ../ escapes),
+  // strip query strings, and only serve known extensions.
+  let pathname;
+  try {
+    pathname = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  } catch (e) {
+    res.writeHead(400, SECURITY_HEADERS); return res.end('Bad request');
+  }
+  if (pathname === '/') pathname = '/index.html';
+  const filePath = path.normalize(path.join(__dirname, pathname));
   const ext = path.extname(filePath);
+  if (!filePath.startsWith(__dirname + path.sep) || !MIME[ext] || filePath === SAVE_FILE) {
+    res.writeHead(404, SECURITY_HEADERS); return res.end('Not found');
+  }
   fs.readFile(filePath, (err, data) => {
-    if (err) { res.writeHead(404); return res.end('Not found'); }
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'text/plain' });
+    if (err) { res.writeHead(404, SECURITY_HEADERS); return res.end('Not found'); }
+    res.writeHead(200, { 'Content-Type': MIME[ext], ...SECURITY_HEADERS });
     res.end(data);
   });
 });
@@ -755,7 +817,7 @@ function broadcastState() {
   const agentData = agents.map(a => ({
     id: a.id, x: a.x|0, y: a.y|0,
     angle: (a.angle*100|0)/100, energy: a.energy|0, maxEnergy: MAX_ENERGY,
-    hp: a.hp|0, maxHp: MAX_HP, generation: a.generation, bloodline: a.bloodline,
+    hp: a.hp|0, maxHp: agentMaxHp(a)|0, generation: a.generation, bloodline: a.bloodline,
     age: a.age, kills: a.kills, foodEaten: a.foodEaten, offspringCount: a.offspringCount,
     brainSize: (a.brain && a.brain.connections) ? a.brain.connections.length : 0,
     cellCount: a.cells ? a.cells.length : 1,
@@ -773,29 +835,74 @@ function broadcastState() {
   }
 }
 
+const MAX_WS_MESSAGE = 4096;   // control messages are tiny — cap hard
+const WS_RATE_LIMIT = 120;     // messages per second per connection
+let lastCatastrophe = 0;
+let possessOwner = null;       // the socket controlling the possessed agent
+
+function releasePossession(notify = true) {
+  possessedId = null;
+  possessedInput = { keys: {}, mouse: null };
+  if (notify && possessOwner && possessOwner.readyState === WebSocket.OPEN) {
+    possessOwner.send(JSON.stringify({ type: 'released' }));
+  }
+  possessOwner = null;
+}
+
 wss.on('connection', (ws) => {
+  ws._msgCount = 0;
+  ws._msgWindow = Date.now();
   ws.send(JSON.stringify({ type: 'terrain', terrain, mapSize: MAP_SIZE }));
+
+  ws.on('close', () => {
+    // Don't leave an orphaned possession when the controlling tab closes
+    if (possessOwner === ws) releasePossession(false);
+  });
+
   ws.on('message', (raw) => {
+    if (raw.length > MAX_WS_MESSAGE) return;
+    const now = Date.now();
+    if (now - ws._msgWindow > 1000) { ws._msgWindow = now; ws._msgCount = 0; }
+    if (++ws._msgCount > WS_RATE_LIMIT) return;
+
     try {
       const msg = JSON.parse(raw);
+      if (!msg || typeof msg.type !== 'string') return;
       switch (msg.type) {
-        case 'speed': simSpeed = Math.max(1, Math.min(1000, msg.value || 1)); break;
+        case 'speed': simSpeed = clampSpeed(msg.value); break;
         case 'pause': paused = !paused; ws.send(JSON.stringify({ type: 'paused', paused })); break;
         case 'possess': {
           if (agents.length === 0) break;
           const best = agents.reduce((b, a) => agentFitness(a) > agentFitness(b) ? a : b, agents[0]);
           possessedId = best.id;
+          possessOwner = ws;
           ws.send(JSON.stringify({ type: 'possessed', agentId: possessedId }));
           break;
         }
         case 'possessId': {
           const target = agents.find(a => a.id === msg.id);
-          if (target) { possessedId = target.id; ws.send(JSON.stringify({ type: 'possessed', agentId: possessedId })); }
+          if (target) {
+            possessedId = target.id;
+            possessOwner = ws;
+            ws.send(JSON.stringify({ type: 'possessed', agentId: possessedId }));
+          }
           break;
         }
-        case 'release': possessedId = null; possessedInput = { keys: {}, mouse: null }; break;
-        case 'input': possessedInput = { keys: msg.keys || {}, mouse: msg.mouse || null }; break;
+        case 'release': releasePossession(); break;
+        case 'input': {
+          if (possessOwner !== ws) break; // only the possessing client steers
+          const keys = {};
+          if (msg.keys && typeof msg.keys === 'object') {
+            for (const k of ['w', 'a', 's', 'd', 'e', 'r', ' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']) {
+              if (msg.keys[k]) keys[k] = true;
+            }
+          }
+          possessedInput = { keys, mouse: null };
+          break;
+        }
         case 'catastrophe': {
+          if (now - lastCatastrophe < 10000) break; // 10s cooldown — no spam-wipes
+          lastCatastrophe = now;
           const killCount = Math.floor(agents.length * 0.7);
           const shuffled = [...agents].sort(() => Math.random() - 0.5);
           for (let i = 0; i < killCount; i++) {
@@ -803,6 +910,7 @@ wss.on('connection', (ws) => {
             dropMeat(shuffled[i].x, shuffled[i].y, MAX_ENERGY * 0.3, 2);
             stats.totalDeaths++;
           }
+          if (possessedId != null && !agents.some(a => a.alive && a.id === possessedId)) releasePossession();
           agents = agents.filter(a => a.alive);
           break;
         }
@@ -834,7 +942,22 @@ function init() {
   if (!loaded) spawnInitialAgents(INITIAL_AGENTS);
   if (terrain.length === 0) generateTerrain();
   setInterval(gameLoop, Math.round(1000 / TICK_RATE));
-  server.listen(PORT, () => console.log(`Evolution Simulator running on http://localhost:${PORT}`));
+  server.listen(PORT, HOST, () => {
+    console.log(`Evolution Simulator running on http://${HOST}:${PORT}`);
+    if (HOST !== '127.0.0.1') console.log('WARNING: listening beyond loopback — make sure that is intended.');
+  });
 }
+
+// Save on shutdown — Ctrl+C used to throw away up to 2 minutes of evolution
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n${signal} — saving state...`);
+  saveState();
+  process.exit(0);
+}
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 init();

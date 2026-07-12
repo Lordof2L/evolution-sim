@@ -88,6 +88,10 @@ npm start
 
 Open `http://localhost:3333` in your browser.
 
+The server listens on `127.0.0.1` by default. To play from another device on
+your LAN, start it with `HOST=0.0.0.0 npm start` (and treat that as a trusted
+network — there is no authentication).
+
 ### Controls
 
 | Key | Action |

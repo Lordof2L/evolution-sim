@@ -3,11 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex">
 <title>Evolution Simulator</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Press+Start+2P&display=swap" rel="stylesheet">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='40' fill='%23d4a853'/%3E%3Ccircle cx='38' cy='42' r='9' fill='%230a0e14'/%3E%3Ccircle cx='64' cy='55' r='6' fill='%230a0e14'/%3E%3C/svg%3E">
 <style>
+/* Self-hosted system font stack — no CDN request, works offline */
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#0a0e14;color:#e0e0e0;font-family:'Inter',sans-serif;overflow:hidden;height:100vh;width:100vw}
+body{background:#0a0e14;color:#e0e0e0;font-family:'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;overflow:hidden;height:100vh;width:100vw}
 canvas#main{position:absolute;top:0;left:0;width:100%;height:100%;cursor:crosshair}
 .glass{background:rgba(10,14,20,0.82);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(212,168,83,0.2);border-radius:8px;padding:10px 14px;color:#e0e0e0;font-size:12px}
 .top-bar{position:fixed;top:8px;left:8px;right:8px;display:flex;gap:8px;z-index:10;pointer-events:none;align-items:flex-start}
@@ -27,8 +29,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;heigh
 .hud-bar{height:6px;border-radius:3px;background:#111;border:1px solid #222;position:relative;margin:2px 0}
 .hud-bar-fill{height:100%;border-radius:2px;transition:width .15s}
 .overlay{position:fixed;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;z-index:100;background:rgba(10,14,20,0.85);backdrop-filter:blur(6px)}
-.overlay-box{text-align:center;color:#d4a853;font-family:'Press Start 2P',monospace;font-size:12px}
-.speed-badge{position:fixed;top:50%;right:16px;transform:translateY(-50%);z-index:20;font-family:'Press Start 2P',monospace;font-size:14px;color:#d4a853;text-shadow:0 0 12px rgba(212,168,83,0.6);opacity:0;transition:opacity .3s;pointer-events:none}
+.overlay-box{text-align:center;color:#d4a853;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-weight:700;letter-spacing:2px;font-size:13px}
+.speed-badge{position:fixed;top:50%;right:16px;transform:translateY(-50%);z-index:20;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-weight:700;letter-spacing:1px;font-size:15px;color:#d4a853;text-shadow:0 0 12px rgba(212,168,83,0.6);opacity:0;transition:opacity .3s;pointer-events:none}
 .speed-badge.show{opacity:1}
 .nn-legend{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;font-size:9px}
 .nn-legend span{display:flex;align-items:center;gap:3px}
@@ -122,14 +124,25 @@ let ws = null, connected = false, paused = false;
 let lastFrameTime = performance.now(), fps = 0, frameCount = 0, fpsTimer = 0;
 let dragging = false, dragStart = { x: 0, y: 0 }, camStart = { x: 0, y: 0 };
 
-function resize() { C.width = window.innerWidth; C.height = window.innerHeight; }
-window.addEventListener('resize', resize); resize();
+// HiDPI-aware canvas — crisp rendering on retina displays
+var DPR = 1, VW = 0, VH = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  VW = window.innerWidth; VH = window.innerHeight;
+  C.width = Math.round(VW * DPR);
+  C.height = Math.round(VH * DPR);
+  C.style.width = VW + 'px';
+  C.style.height = VH + 'px';
+  terrainCacheKey = ''; // invalidate terrain cache on resize
+}
+window.addEventListener('resize', resize);
+resize();
 
 function w2s(wx, wy) {
-  return { x: (wx - cam.x) * cam.zoom + C.width / 2, y: (wy - cam.y) * cam.zoom + C.height / 2 };
+  return { x: (wx - cam.x) * cam.zoom + VW / 2, y: (wy - cam.y) * cam.zoom + VH / 2 };
 }
 function onScreen(sx, sy, margin) {
-  return sx > -margin && sx < C.width + margin && sy > -margin && sy < C.height + margin;
+  return sx > -margin && sx < VW + margin && sy > -margin && sy < VH + margin;
 }
 // Terrain cache — render once to offscreen canvas, redraw only on zoom/pan change
 var terrainCache = null, terrainCacheKey = '';
@@ -140,6 +153,7 @@ function getTerrainCache() {
   if (!terrainCache) { terrainCache = document.createElement('canvas'); }
   terrainCache.width = C.width; terrainCache.height = C.height;
   var tc = terrainCache.getContext('2d');
+  tc.setTransform(DPR, 0, 0, DPR, 0, 0);
   var cellSize = mapSize / (terrain.length || 40);
   for (var y = 0; y < terrain.length; y++) {
     var row = terrain[y]; if (!row) continue;
@@ -156,16 +170,19 @@ function getTerrainCache() {
   return terrainCache;
 }
 function s2w(sx, sy) {
-  return { x: (sx - C.width / 2) / cam.zoom + cam.x, y: (sy - C.height / 2) / cam.zoom + cam.y };
+  return { x: (sx - VW / 2) / cam.zoom + cam.x, y: (sy - VH / 2) / cam.zoom + cam.y };
 }
 function fitView() {
   cam.x = mapSize / 2; cam.y = mapSize / 2;
-  cam.zoom = Math.min(C.width, C.height) / (mapSize + 40);
+  cam.zoom = Math.min(VW, VH) / (mapSize + 40);
   $('zoomVal').textContent = cam.zoom.toFixed(2);
 }
 
 function connect() {
-  ws = new WebSocket('ws://localhost:3333');
+  // Same host/port the page was served from; wss when behind HTTPS
+  var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  var host = location.host || 'localhost:3333';
+  ws = new WebSocket(proto + host);
   ws.onopen = function() { connected = true; $('reconnectOverlay').style.display = 'none'; };
   ws.onclose = function() { connected = false; $('reconnectOverlay').style.display = 'flex'; setTimeout(connect, 2000); };
   ws.onerror = function() { ws.close(); };
@@ -245,7 +262,7 @@ function blColor(bl) { return 'hsl(' + ((bl * 137) % 360) + ',70%,55%)'; }
 
 function drawTerrain() {
   var cached = getTerrainCache();
-  if (cached) ctx.drawImage(cached, 0, 0);
+  if (cached) ctx.drawImage(cached, 0, 0, VW, VH);
 }
 
 function drawBoundary() {
@@ -451,7 +468,7 @@ function updateHud() {
 }
 
 function updateBloodlines() {
-  var bl = (stats.topBloodlines || []).slice(0, 6);
+  var bl = (stats.bloodlines || []).slice(0, 6);
   var container = $('bloodList');
   while (container.firstChild) container.removeChild(container.firstChild);
   for (var i = 0; i < bl.length; i++) {
@@ -488,7 +505,8 @@ function render() {
   fpsTimer += now - lastFrameTime;
   lastFrameTime = now;
   if (fpsTimer >= 1000) { fps = frameCount; frameCount = 0; fpsTimer = 0; }
-  ctx.clearRect(0, 0, C.width, C.height);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.clearRect(0, 0, VW, VH);
   drawTerrain();
   drawBoundary();
   drawFood();

@@ -37,14 +37,13 @@ function check() {
           status: agentCount > 0 ? 'ALIVE' : 'EXTINCT',
           agents: agentCount,
           food: foodCount,
-          maxGen: s.maxGeneration || 0,
+          maxGen: s.maxGen || 0,
           totalBorn: s.totalBorn || 0,
           totalDeaths: s.totalDeaths || 0,
-          avgFitness: s.avgFitness || 0,
-          topTier: s.topTierAlive || 0,
+          avgFitness: Math.round(s.avgFitness || 0),
         };
 
-        console.log(`[CHECK ${checkCount}] ${entry.status} | Agents: ${entry.agents} | Food: ${entry.food} | MaxGen: ${entry.maxGen} | TopTier: T${entry.topTier} | Born: ${entry.totalBorn} | Deaths: ${entry.totalDeaths}`);
+        console.log(`[CHECK ${checkCount}] ${entry.status} | Agents: ${entry.agents} | Food: ${entry.food} | MaxGen: ${entry.maxGen} | Born: ${entry.totalBorn} | Deaths: ${entry.totalDeaths}`);
         logEntry(entry);
 
         if (entry.status === 'EXTINCT') {
