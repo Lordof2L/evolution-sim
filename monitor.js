@@ -7,7 +7,7 @@ const path = require('path');
 
 const LOG_FILE = path.join(__dirname, 'monitor_log.jsonl');
 const CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
-const SERVER_URL = process.env.EVOLUTION_SERVER_URL || 'ws://127.0.0.1:3333';
+const SERVER_URL = 'ws://127.0.0.1:3333';
 let checkCount = 0;
 
 function finiteMetric(value) {
