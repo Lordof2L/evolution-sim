@@ -3,7 +3,8 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "test": "node --test --test-concurrency=1"
   },
   "dependencies": {
     "express": "^4.22.2",

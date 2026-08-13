@@ -5,7 +5,9 @@ const path = require('path');
 const WebSocket = require('ws');
 
 // ─── CONSTANTS ───────────────────────────────────────────────
-const PORT = 3333;
+const requestedPort = Number.parseInt(process.env.PORT || '3333', 10);
+const PORT = Number.isInteger(requestedPort) && requestedPort >= 0 && requestedPort <= 65535 ? requestedPort : 3333;
+const HOST = process.env.HOST || '127.0.0.1';
 const TICK_RATE = 30;
 const MAP_SIZE = 800;
 const MAP_CENTER = 400;
@@ -19,6 +21,63 @@ const SENSING_RANGE = 100;
 const SPATIAL_CELL = 50;
 const SAVE_FILE = path.join(__dirname, 'save.json');
 const SAVE_VERSION = 8;
+const MAX_HTTP_BODY_BYTES = 1024;
+const MAX_WEBSOCKET_PAYLOAD_BYTES = 16 * 1024;
+const HISTORY_KEYS = Object.freeze(['lifespan', 'gen', 'foodPerMin', 'survivalRate', 'avgConnections']);
+const STATIC_FILES = new Map([
+  ['/', 'index.html'],
+  ['/index.html', 'index.html'],
+]);
+const SECURITY_HEADERS = Object.freeze({
+  'Cache-Control': 'no-store',
+  'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Referrer-Policy': 'no-referrer',
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+});
+
+function createHistory(source = {}) {
+  const historySource = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
+  const safeSeries = (key) => Array.isArray(historySource[key])
+    ? historySource[key].filter(Number.isFinite).slice(-50)
+    : [];
+
+  return {
+    lifespan: safeSeries('lifespan'),
+    gen: safeSeries('gen'),
+    foodPerMin: safeSeries('foodPerMin'),
+    survivalRate: safeSeries('survivalRate'),
+    avgConnections: safeSeries('avgConnections'),
+  };
+}
+
+function isLoopbackHost(hostHeader) {
+  if (typeof hostHeader !== 'string') return false;
+  try {
+    const hostname = new URL(`http://${hostHeader}`).hostname.toLowerCase();
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]';
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedBrowserOrigin(origin, hostHeader) {
+  if (!origin) return true;
+  try {
+    const parsed = new URL(origin);
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+      && isLoopbackHost(parsed.host)
+      && parsed.host.toLowerCase() === String(hostHeader).toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+function sendHttp(res, statusCode, body, headers = {}) {
+  res.writeHead(statusCode, { ...SECURITY_HEADERS, ...headers });
+  res.end(body);
+}
 
 // ─── GLOBAL STATE ────────────────────────────────────────────
 let agents = [];
@@ -37,7 +96,7 @@ let emptyTicks = 0;
 
 // Stats
 let stats = { population: 0, maxGen: 0, totalBorn: 0, totalDeaths: 0, avgFitness: 0, avgConnections: 0 };
-let nnHistory = { lifespan: [], gen: [], foodPerMin: [], survivalRate: [], avgConnections: [] };
+let nnHistory = createHistory();
 
 // ─── TERRAIN ─────────────────────────────────────────────────
 function generateTerrain() {
@@ -646,7 +705,7 @@ function tick() {
     nnHistory.survivalRate.push(agents.length);
     nnHistory.avgConnections.push(Math.round(stats.avgConnections * 10) / 10);
     const maxHist = 50;
-    for (const key of Object.keys(nnHistory)) {
+    for (const key of HISTORY_KEYS) {
       if (nnHistory[key].length > maxHist) nnHistory[key] = nnHistory[key].slice(-maxHist);
     }
   }
@@ -654,9 +713,12 @@ function tick() {
 
 // ─── BLOODLINES ──────────────────────────────────────────────
 function getTopBloodlines() {
-  const counts = {};
-  for (const a of agents) counts[a.bloodline] = (counts[a.bloodline] || 0) + 1;
-  return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([bl, count]) => ({ bloodline: Number(bl), count }));
+  const counts = new Map();
+  for (const agent of agents) counts.set(agent.bloodline, (counts.get(agent.bloodline) || 0) + 1);
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+    .map(([bloodline, count]) => ({ bloodline, count }));
 }
 
 // ─── SAVE / LOAD ─────────────────────────────────────────────
@@ -687,16 +749,18 @@ function loadState() {
     if (!fs.existsSync(SAVE_FILE)) return false;
     const data = JSON.parse(fs.readFileSync(SAVE_FILE, 'utf8'));
     if (data.version < SAVE_VERSION) { console.log('Old save version, ignoring.'); return false; }
-    tickCount = data.tickCount || 0;
-    nextId = data.nextId || 1;
-    nextInnovation = data.nextInnovation || 0;
+    tickCount = Number.isSafeInteger(data.tickCount) && data.tickCount >= 0 ? data.tickCount : 0;
+    nextId = Number.isSafeInteger(data.nextId) && data.nextId >= 1 ? data.nextId : 1;
+    nextInnovation = Number.isSafeInteger(data.nextInnovation) && data.nextInnovation >= 0 ? data.nextInnovation : 0;
     innovationMap.clear();
     if (data.innovationEntries) for (const [k, v] of data.innovationEntries) innovationMap.set(k, v);
     terrain = data.terrain || [];
     stats = data.stats || stats;
-    nnHistory = data.nnHistory || nnHistory;
+    nnHistory = createHistory(data.nnHistory);
     food = (data.food || []).map(f => ({ ...f, _isFood: true }));
     agents = (data.agents || []).map(a => {
+      const agentId = Number(a.id);
+      if (!Number.isSafeInteger(agentId) || agentId < 1) throw new TypeError('Invalid agent ID in save file');
       const brain = createBrain();
       brain.nextNode = a.brain.nextNode || 12;
       brain.connections = a.brain.connections || [];
@@ -705,7 +769,7 @@ function loadState() {
         for (const [id, type] of a.brain.nodeTypes) brain.nodes.set(id, { value: 0, type });
       }
       return {
-        id: a.id, x: a.x, y: a.y, angle: a.angle, speed: a.speed || 0,
+        id: agentId, x: a.x, y: a.y, angle: a.angle, speed: a.speed || 0,
         energy: a.energy, hp: a.hp, age: a.age,
         brain, foodEaten: a.foodEaten, kills: a.kills, offspringCount: a.offspringCount,
         generation: a.generation, bloodline: a.bloodline,
@@ -723,31 +787,87 @@ function loadState() {
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml' };
 
 const server = http.createServer((req, res) => {
-  if (req.method === 'GET' && req.url === '/stats') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ ...stats, tickCount, foodCount: food.length, bloodlines: getTopBloodlines(), nnHistory }));
+  if (!isLoopbackHost(req.headers.host)) {
+    return sendHttp(res, 421, 'Misdirected request', { 'Content-Type': 'text/plain; charset=utf-8' });
   }
-  if (req.method === 'POST' && req.url === '/speed') {
+
+  let requestUrl;
+  try {
+    requestUrl = new URL(req.url, 'http://localhost');
+  } catch {
+    return sendHttp(res, 400, 'Bad request', { 'Content-Type': 'text/plain; charset=utf-8' });
+  }
+
+  if (req.method === 'GET' && requestUrl.pathname === '/stats') {
+    return sendHttp(
+      res,
+      200,
+      JSON.stringify({ ...stats, tickCount, foodCount: food.length, bloodlines: getTopBloodlines(), nnHistory }),
+      { 'Content-Type': 'application/json' },
+    );
+  }
+
+  if (req.method === 'POST' && requestUrl.pathname === '/speed') {
+    if (!isAllowedBrowserOrigin(req.headers.origin, req.headers.host)) {
+      return sendHttp(res, 403, 'Forbidden', { 'Content-Type': 'text/plain; charset=utf-8' });
+    }
+
     let body = '';
-    req.on('data', c => body += c);
+    let bodyBytes = 0;
+    let bodyTooLarge = false;
+    req.on('data', (chunk) => {
+      bodyBytes += chunk.length;
+      if (bodyBytes > MAX_HTTP_BODY_BYTES) {
+        bodyTooLarge = true;
+        return;
+      }
+      body += chunk;
+    });
     req.on('end', () => {
-      try { simSpeed = JSON.parse(body).speed || 1; } catch (e) {}
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ speed: simSpeed }));
+      if (bodyTooLarge) {
+        return sendHttp(res, 413, 'Payload too large', { 'Content-Type': 'text/plain; charset=utf-8' });
+      }
+      try {
+        const requestedSpeed = Number(JSON.parse(body).speed);
+        if (!Number.isFinite(requestedSpeed)) throw new TypeError('speed must be a finite number');
+        simSpeed = Math.max(1, Math.min(1000, requestedSpeed));
+        return sendHttp(res, 200, JSON.stringify({ speed: simSpeed }), { 'Content-Type': 'application/json' });
+      } catch {
+        return sendHttp(res, 400, 'Invalid speed', { 'Content-Type': 'text/plain; charset=utf-8' });
+      }
     });
     return;
   }
-  let filePath = path.join(__dirname, req.url === '/' ? 'index.html' : req.url);
+
+  if (req.method !== 'GET') {
+    return sendHttp(res, 405, 'Method not allowed', {
+      Allow: 'GET, POST',
+      'Content-Type': 'text/plain; charset=utf-8',
+    });
+  }
+
+  const fileName = STATIC_FILES.get(requestUrl.pathname);
+  if (!fileName) return sendHttp(res, 404, 'Not found', { 'Content-Type': 'text/plain; charset=utf-8' });
+
+  const filePath = path.join(__dirname, fileName);
   const ext = path.extname(filePath);
   fs.readFile(filePath, (err, data) => {
-    if (err) { res.writeHead(404); return res.end('Not found'); }
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'text/plain' });
-    res.end(data);
+    if (err) return sendHttp(res, 404, 'Not found', { 'Content-Type': 'text/plain; charset=utf-8' });
+    return sendHttp(res, 200, data, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
   });
 });
 
 // ─── WEBSOCKET ───────────────────────────────────────────────
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocket.Server({
+  server,
+  maxPayload: MAX_WEBSOCKET_PAYLOAD_BYTES,
+  verifyClient(info, done) {
+    const allowed = isLoopbackHost(info.req.headers.host)
+      && isAllowedBrowserOrigin(info.origin, info.req.headers.host);
+    if (allowed) done(true);
+    else done(false, 403, 'Forbidden');
+  },
+});
 
 function broadcastState() {
   if (wss.clients.size === 0) return;
@@ -765,8 +885,13 @@ function broadcastState() {
   }));
   const foodData = food.map(f => ({ x: f.x|0, y: f.y|0, r: f.r, c: f.color }));
   // Slim nnHistory: only last 50 datapoints per series
-  const slimHist = {};
-  for (const k of Object.keys(nnHistory)) slimHist[k] = nnHistory[k].slice(-50);
+  const slimHist = {
+    lifespan: nnHistory.lifespan.slice(-50),
+    gen: nnHistory.gen.slice(-50),
+    foodPerMin: nnHistory.foodPerMin.slice(-50),
+    survivalRate: nnHistory.survivalRate.slice(-50),
+    avgConnections: nnHistory.avgConnections.slice(-50),
+  };
   const msg = JSON.stringify({ type: 'state', tick: tickCount, agents: agentData, food: foodData, stats: { ...stats, foodCount: food.length, bloodlines: getTopBloodlines(), nnHistory: slimHist } });
   for (const ws of wss.clients) {
     if (ws.readyState === WebSocket.OPEN) ws.send(msg);
@@ -778,8 +903,13 @@ wss.on('connection', (ws) => {
   ws.on('message', (raw) => {
     try {
       const msg = JSON.parse(raw);
+      if (!msg || typeof msg !== 'object' || Array.isArray(msg) || typeof msg.type !== 'string') return;
       switch (msg.type) {
-        case 'speed': simSpeed = Math.max(1, Math.min(1000, msg.value || 1)); break;
+        case 'speed': {
+          const requestedSpeed = Number(msg.value);
+          if (Number.isFinite(requestedSpeed)) simSpeed = Math.max(1, Math.min(1000, requestedSpeed));
+          break;
+        }
         case 'pause': paused = !paused; ws.send(JSON.stringify({ type: 'paused', paused })); break;
         case 'possess': {
           if (agents.length === 0) break;
@@ -789,12 +919,33 @@ wss.on('connection', (ws) => {
           break;
         }
         case 'possessId': {
-          const target = agents.find(a => a.id === msg.id);
+          const requestedId = Number(msg.id);
+          if (!Number.isSafeInteger(requestedId) || requestedId < 1) break;
+          const target = agents.find(a => a.id === requestedId);
           if (target) { possessedId = target.id; ws.send(JSON.stringify({ type: 'possessed', agentId: possessedId })); }
           break;
         }
         case 'release': possessedId = null; possessedInput = { keys: {}, mouse: null }; break;
-        case 'input': possessedInput = { keys: msg.keys || {}, mouse: msg.mouse || null }; break;
+        case 'input': {
+          const inputKeys = msg.keys && typeof msg.keys === 'object' && !Array.isArray(msg.keys) ? msg.keys : {};
+          possessedInput = {
+            keys: {
+              w: inputKeys.w === true,
+              s: inputKeys.s === true,
+              a: inputKeys.a === true,
+              d: inputKeys.d === true,
+              e: inputKeys.e === true,
+              r: inputKeys.r === true,
+              ArrowUp: inputKeys.ArrowUp === true,
+              ArrowDown: inputKeys.ArrowDown === true,
+              ArrowLeft: inputKeys.ArrowLeft === true,
+              ArrowRight: inputKeys.ArrowRight === true,
+              ' ': inputKeys[' '] === true,
+            },
+            mouse: null,
+          };
+          break;
+        }
         case 'catastrophe': {
           const killCount = Math.floor(agents.length * 0.7);
           const shuffled = [...agents].sort(() => Math.random() - 0.5);
@@ -807,7 +958,9 @@ wss.on('connection', (ws) => {
           break;
         }
       }
-    } catch (e) {}
+    } catch {
+      console.warn('Ignored invalid WebSocket message');
+    }
   });
 });
 
@@ -834,7 +987,10 @@ function init() {
   if (!loaded) spawnInitialAgents(INITIAL_AGENTS);
   if (terrain.length === 0) generateTerrain();
   setInterval(gameLoop, Math.round(1000 / TICK_RATE));
-  server.listen(PORT, () => console.log(`Evolution Simulator running on http://localhost:${PORT}`));
+  server.listen(PORT, HOST, () => {
+    const address = server.address();
+    console.log(`Evolution Simulator running on http://${HOST}:${address.port}`);
+  });
 }
 
 init();
