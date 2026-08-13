@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Evolution Simulator</title>
+<link rel="icon" href="data:,">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Press+Start+2P&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -117,7 +118,7 @@ const brC = $('brainCanvas'), brCtx = brC.getContext('2d');
 let terrain = [], mapSize = 800, agents = [], food = [], stats = {}, tick = 0;
 let possessedId = null, possessedAgent = null;
 let cam = { x: 400, y: 400, zoom: 1 };
-let keys = {}, mouseX = 0, mouseY = 0;
+let keys = Object.create(null), mouseX = 0, mouseY = 0;
 let ws = null, connected = false, paused = false;
 let lastFrameTime = performance.now(), fps = 0, frameCount = 0, fpsTimer = 0;
 let dragging = false, dragStart = { x: 0, y: 0 }, camStart = { x: 0, y: 0 };
@@ -165,7 +166,8 @@ function fitView() {
 }
 
 function connect() {
-  ws = new WebSocket('ws://localhost:3333');
+  var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(protocol + '//' + window.location.host);
   ws.onopen = function() { connected = true; $('reconnectOverlay').style.display = 'none'; };
   ws.onclose = function() { connected = false; $('reconnectOverlay').style.display = 'flex'; setTimeout(connect, 2000); };
   ws.onerror = function() { ws.close(); };
@@ -219,7 +221,8 @@ C.addEventListener('mousedown', function(e) {
       var d = Math.hypot(agents[i].x - w.x, agents[i].y - w.y);
       if (d < bestD) { bestD = d; best = agents[i]; }
     }
-    if (best) send({ type: 'possessId', agentId: best.id });
+    var selectedId = best ? Number(best.id) : NaN;
+    if (Number.isSafeInteger(selectedId) && selectedId > 0) send({ type: 'possessId', id: selectedId });
   }
 });
 C.addEventListener('mousemove', function(e) {
@@ -271,7 +274,7 @@ function drawFood() {
   }
 }
 
-var CCOL = { core: '#888', mouth: '#ff6666', muscle: '#6688ff', sensor: '#ffffff', armor: '#666666' };
+var CCOL = new Map([['core', '#888'], ['mouth', '#ff6666'], ['muscle', '#6688ff'], ['sensor', '#ffffff'], ['armor', '#666666']]);
 function drawAgents() {
   for (var i = 0; i < agents.length; i++) {
     var a = agents[i];
@@ -309,7 +312,7 @@ function drawAgents() {
         var c = a.cells[ci];
         var cx = c.lx * cam.zoom, cy = c.ly * cam.zoom;
         ctx.globalAlpha = alpha;
-        ctx.fillStyle = CCOL[c.type] || col;
+        ctx.fillStyle = CCOL.get(c.type) || col;
         ctx.beginPath(); ctx.arc(cx, cy, cs, 0, Math.PI * 2); ctx.fill();
       }
       ctx.globalAlpha = 1;
@@ -379,24 +382,25 @@ function drawBrain(agent) {
   var outLabels = ['accel','rotate','eat','repro'];
   var inCount = inLabels.length, outCount = outLabels.length;
   var conns = agent.brainConnections || [];
-  var nodes = {};
+  var nodes = new Map();
   var inX = 30, outX = w - 30;
   var i, n, id;
-  for (i = 0; i < inCount; i++) nodes[i] = { x: inX, y: 16 + i * ((h - 32) / (inCount - 1)), label: inLabels[i], type: 'in' };
-  for (i = 0; i < outCount; i++) nodes[inCount + i] = { x: outX, y: 30 + i * ((h - 60) / (outCount - 1)), label: outLabels[i], type: 'out' };
-  var hiddenIds = {};
+  for (i = 0; i < inCount; i++) nodes.set(i, { x: inX, y: 16 + i * ((h - 32) / (inCount - 1)), label: inLabels[i], type: 'in' });
+  for (i = 0; i < outCount; i++) nodes.set(inCount + i, { x: outX, y: 30 + i * ((h - 60) / (outCount - 1)), label: outLabels[i], type: 'out' });
+  var hiddenIds = new Set();
   for (i = 0; i < conns.length; i++) {
-    if (!(conns[i].from in nodes)) hiddenIds[conns[i].from] = true;
-    if (!(conns[i].to in nodes)) hiddenIds[conns[i].to] = true;
+    var fromId = Number(conns[i].from), toId = Number(conns[i].to);
+    if (Number.isSafeInteger(fromId) && fromId >= 0 && !nodes.has(fromId)) hiddenIds.add(fromId);
+    if (Number.isSafeInteger(toId) && toId >= 0 && !nodes.has(toId)) hiddenIds.add(toId);
   }
-  var hiddenArr = Object.keys(hiddenIds).map(Number).sort(function(a, b) { return a - b; });
+  var hiddenArr = Array.from(hiddenIds).sort(function(a, b) { return a - b; });
   for (i = 0; i < hiddenArr.length; i++) {
     var col = (i % 3);
-    nodes[hiddenArr[i]] = { x: inX + (outX - inX) * (0.3 + 0.15 * col), y: 20 + (i / Math.max(hiddenArr.length - 1, 1)) * (h - 40), label: '', type: 'hidden' };
+    nodes.set(hiddenArr[i], { x: inX + (outX - inX) * (0.3 + 0.15 * col), y: 20 + (i / Math.max(hiddenArr.length - 1, 1)) * (h - 40), label: '', type: 'hidden' });
   }
   for (i = 0; i < conns.length; i++) {
     var c = conns[i];
-    var from = nodes[c.from], to = nodes[c.to]; if (!from || !to) continue;
+    var from = nodes.get(Number(c.from)), to = nodes.get(Number(c.to)); if (!from || !to) continue;
     var aw = Math.abs(c.weight);
     brCtx.beginPath(); brCtx.moveTo(from.x, from.y); brCtx.lineTo(to.x, to.y);
     var alpha = c.enabled ? 0.3 + Math.min(aw * 0.3, 0.7) : 0.08;
@@ -407,15 +411,15 @@ function drawBrain(agent) {
   }
   brCtx.setLineDash([]);
   var outs = agent.outputs || {};
-  var outVals = {};
-  outVals[inCount] = outs.accelerate || 0;
-  outVals[inCount + 1] = outs.rotate || 0;
-  outVals[inCount + 2] = outs.eat || 0;
-  outVals[inCount + 3] = outs.reproduce || 0;
-  var nodeIds = Object.keys(nodes);
+  var outVals = new Map();
+  outVals.set(inCount, outs.accelerate || 0);
+  outVals.set(inCount + 1, outs.rotate || 0);
+  outVals.set(inCount + 2, outs.eat || 0);
+  outVals.set(inCount + 3, outs.reproduce || 0);
+  var nodeIds = Array.from(nodes.keys());
   for (i = 0; i < nodeIds.length; i++) {
-    id = nodeIds[i]; n = nodes[id];
-    var act = outVals[id] !== undefined ? Math.abs(outVals[id]) : 0.3;
+    id = nodeIds[i]; n = nodes.get(id);
+    var act = outVals.has(id) ? Math.abs(outVals.get(id)) : 0.3;
     var r = 4 + act * 4;
     brCtx.beginPath(); brCtx.arc(n.x, n.y, r, 0, Math.PI * 2);
     brCtx.fillStyle = n.type === 'in' ? '#22d3ee' : n.type === 'out' ? '#d4a853' : '#888';

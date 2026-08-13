@@ -7,11 +7,21 @@ const path = require('path');
 
 const LOG_FILE = path.join(__dirname, 'monitor_log.jsonl');
 const CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
+const SERVER_URL = process.env.EVOLUTION_SERVER_URL || 'ws://127.0.0.1:3333';
 let checkCount = 0;
+
+function finiteMetric(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function singleLine(value) {
+  return String(value).replace(/[\r\n\u001b]/g, ' ').slice(0, 500);
+}
 
 function check() {
   checkCount++;
-  const ws = new WebSocket('ws://localhost:3333');
+  const ws = new WebSocket(SERVER_URL);
   let timeout = setTimeout(() => {
     console.log(`[CHECK ${checkCount}] Server not responding`);
     ws.close();
@@ -28,8 +38,8 @@ function check() {
       const msg = JSON.parse(data);
       if (msg.type === 'state' || msg.type === 'stats') {
         const s = msg.stats || {};
-        const agentCount = msg.agents ? msg.agents.length : (s.population || 0);
-        const foodCount = msg.food ? msg.food.length : (s.foodCount || 0);
+        const agentCount = finiteMetric(msg.agents ? msg.agents.length : s.population);
+        const foodCount = finiteMetric(msg.food ? msg.food.length : s.foodCount);
 
         const entry = {
           time: new Date().toISOString(),
@@ -37,11 +47,11 @@ function check() {
           status: agentCount > 0 ? 'ALIVE' : 'EXTINCT',
           agents: agentCount,
           food: foodCount,
-          maxGen: s.maxGeneration || 0,
-          totalBorn: s.totalBorn || 0,
-          totalDeaths: s.totalDeaths || 0,
-          avgFitness: s.avgFitness || 0,
-          topTier: s.topTierAlive || 0,
+          maxGen: finiteMetric(s.maxGeneration),
+          totalBorn: finiteMetric(s.totalBorn),
+          totalDeaths: finiteMetric(s.totalDeaths),
+          avgFitness: finiteMetric(s.avgFitness),
+          topTier: finiteMetric(s.topTierAlive),
         };
 
         console.log(`[CHECK ${checkCount}] ${entry.status} | Agents: ${entry.agents} | Food: ${entry.food} | MaxGen: ${entry.maxGen} | TopTier: T${entry.topTier} | Born: ${entry.totalBorn} | Deaths: ${entry.totalDeaths}`);
@@ -53,15 +63,16 @@ function check() {
         }
       }
     } catch (e) {
-      console.log(`[CHECK ${checkCount}] Parse error: ${e.message}`);
+      console.log(`[CHECK ${checkCount}] Parse error: ${singleLine(e.message)}`);
     }
     ws.close();
   });
 
   ws.on('error', (err) => {
     clearTimeout(timeout);
-    console.log(`[CHECK ${checkCount}] Connection error: ${err.message}`);
-    logEntry({ time: new Date().toISOString(), status: 'ERROR', check: checkCount, error: err.message });
+    const errorMessage = singleLine(err.message);
+    console.log(`[CHECK ${checkCount}] Connection error: ${errorMessage}`);
+    logEntry({ time: new Date().toISOString(), status: 'ERROR', check: checkCount, error: errorMessage });
   });
 }
 
